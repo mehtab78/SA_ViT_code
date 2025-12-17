@@ -1,0 +1,37 @@
+# Model Configuration
+image_size: 128
+patch_size: 16
+embed_dim: 128
+num_heads: 4
+num_layers: 6
+num_patterns: 3
+num_classes: 2
+dropout: 0.1
+drop_path: 0.1
+
+# Data Configuration
+tickers:
+  - BTC-USD
+  - ETH-USD
+start_date: "2022-01-01"
+end_date: "2024-12-31"
+window_size: 60
+prediction_step: 1
+iqr_multiplier: 1.5
+
+# Training Configuration
+epochs: 15
+batch_size: 32
+learning_rate: 0.0001
+weight_decay: 0.01
+patience: 8
+seed: 42
+
+# Paths
+checkpoints_dir: "checkpoints"
+results_dir: "results"
+logs_dir: "logs"
+
+# Logging
+log_level: "INFO"
+save_intermediate_results: true
