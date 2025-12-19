@@ -15,7 +15,7 @@ tickers:
   - ETH-USD
 start_date: "2022-01-01"
 end_date: "2024-12-31"
-window_size: 60
+window_size: 30
 prediction_step: 1
 iqr_multiplier: 1.5
 
@@ -24,8 +24,8 @@ epochs: 15
 batch_size: 32
 learning_rate: 0.0001
 weight_decay: 0.01
-patience: 8
-seed: 42
+patience: 100
+seed: 67
 
 # Paths
 checkpoints_dir: "checkpoints"

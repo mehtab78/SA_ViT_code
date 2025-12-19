@@ -1,7 +1,7 @@
 """
 Data Loading and Preprocessing Module
 """
-
+import torch
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -89,31 +89,79 @@ class DataPreprocessor:
         df = df.copy()
         scaler_key = ticker
 
+        # Check if columns exist and convert to numeric
+        available_columns = [col for col in columns if col in df.columns]
+        if not available_columns:
+            print(f"Warning: No columns found in {columns} for ticker {ticker}")
+            print(f"Available columns: {list(df.columns)}")
+            return df
+
+        # Convert columns to numeric and handle NaN values
+        for col in available_columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Remove rows with NaN values in the columns to be normalized
+        clean_data = df[available_columns].dropna()
+        if clean_data.empty:
+            print(f"Warning: No valid data found for normalization in columns {available_columns}")
+            return df
+
         if fit:
             self.scalers[scaler_key] = MinMaxScaler(feature_range=self.normalize_range)
-            normalized_data = self.scalers[scaler_key].fit_transform(df[columns])
-            df.loc[:, columns] = normalized_data
+            # Ensure we have a clean 2D array for the scaler
+            try:
+                normalized_data = self.scalers[scaler_key].fit_transform(clean_data.values)
+                # Update only the clean rows in the original dataframe
+                df.loc[clean_data.index, available_columns] = normalized_data
+            except Exception as e:
+                print(f"Error during normalization for ticker {ticker}: {e}")
+                print(f"Data shape: {clean_data.shape}")
+                print(f"Columns: {available_columns}")
+                raise
         else:
             if scaler_key not in self.scalers:
                 raise ValueError(f"No scaler found for ticker '{ticker}'. Must fit first.")
-            df[columns] = self.scalers[scaler_key].transform(df[columns])
+            try:
+                df[available_columns] = self.scalers[scaler_key].transform(clean_data.values)
+            except Exception as e:
+                print(f"Error during transform for ticker {ticker}: {e}")
+                raise
 
         return df
 
     def preprocess(self, df: pd.DataFrame, ticker: str = 'default') -> pd.DataFrame:
         """Apply the full preprocessing pipeline."""
         price_columns = ['Open', 'High', 'Low', 'Close']
+        volume_column = 'Volume'
+        
         df = df.copy()
         
+        print(f"  Input data shape: {df.shape}")
+        print(f"  Available columns: {list(df.columns)}")
+        
+        # Check required columns exist
+        missing_columns = [col for col in price_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
+        
         # Fill NaN values
-        df = df.ffill().fillna(method='bfill')
+        df = df.ffill().bfill()
+        print(f"  After filling NaN: {df.shape}")
         
         # Remove outliers using IQR
         df = self.remove_outliers_iqr(df, price_columns)
+        print(f"  After outlier removal: {df.shape}")
         
-        # Normalize prices and volume
-        df = self.normalize(df, price_columns + ['Volume'], fit=True, ticker=ticker)
-
+        # Normalize prices (always normalize these)
+        df = self.normalize(df, price_columns, fit=True, ticker=ticker)
+        
+        # Normalize volume if it exists
+        if volume_column in df.columns:
+            df = self.normalize(df, [volume_column], fit=True, ticker=f"{ticker}_volume")
+        else:
+            print(f"  Warning: Volume column not found, skipping volume normalization")
+            
+        print(f"  Final preprocessed shape: {df.shape}")
         return df
 
 class CryptoDataset(Dataset):
@@ -137,7 +185,7 @@ class CryptoDataset(Dataset):
 
     def _load_and_preprocess_data(self) -> pd.DataFrame:
         """Load data for specified tickers and apply preprocessing."""
-        combined_df = pd.DataFrame()
+        data_list = []  # Collect data in a list first
         
         for ticker in self.tickers:
             print(f"Loading data for {ticker}...")
@@ -146,14 +194,24 @@ class CryptoDataset(Dataset):
                 if ticker_data.empty:
                     print(f"Warning: No data found for {ticker}")
                     continue
+                
+                # Flatten MultiIndex columns if they exist
+                if isinstance(ticker_data.columns, pd.MultiIndex):
+                    ticker_data.columns = ticker_data.columns.get_level_values(0)
                     
                 ticker_data.reset_index(inplace=True)
                 ticker_data['Ticker'] = ticker
-                combined_df = pd.concat([combined_df, ticker_data], ignore_index=True)
+                data_list.append(ticker_data)
                 
             except Exception as e:
                 print(f"Error loading {ticker}: {e}")
                 continue
+        
+        if not data_list:
+            raise ValueError("No data was loaded for any of the specified tickers.")
+        
+        combined_df = pd.concat(data_list, ignore_index=True)
+        print(f"Loaded raw data for {len(self.tickers)} tickers, shape: {combined_df.shape}")
         
         if combined_df.empty:
             raise ValueError("No data was loaded for any of the specified tickers.")
@@ -170,6 +228,10 @@ class CryptoDataset(Dataset):
         
         final_df = pd.concat(processed_data, ignore_index=True)
         print(f"Preprocessed data shape: {final_df.shape}")
+        print(f"Final DataFrame columns: {list(final_df.columns)}")
+        print(f"Final DataFrame dtypes:")
+        for col in final_df.columns:
+            print(f"  {col}: {final_df[col].dtype}")
         return final_df
 
     def _create_samples(self) -> List[Dict]:
@@ -258,20 +320,28 @@ def create_temporal_splits(dataset: Dataset, train_ratio: float = 0.7, val_ratio
 
 def load_crypto_data(tickers: List[str], start_date: str, end_date: str) -> pd.DataFrame:
     """Load cryptocurrency data from Yahoo Finance."""
-    combined_df = pd.DataFrame()
+    data_list = []  # Collect data in a list first
     
     for ticker in tickers:
         print(f"Loading {ticker} from {start_date} to {end_date}...")
         try:
             data = yf.download(ticker, start=start_date, end=end_date)
             if not data.empty:
+                # Flatten MultiIndex columns if they exist
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                    
                 data.reset_index(inplace=True)
                 data['Ticker'] = ticker
-                combined_df = pd.concat([combined_df, data], ignore_index=True)
+                data_list.append(data)
                 print(f"✓ Loaded {len(data)} days of data for {ticker}")
             else:
                 print(f"✗ No data found for {ticker}")
         except Exception as e:
             print(f"✗ Error loading {ticker}: {e}")
     
+    if not data_list:
+        raise ValueError("No data was loaded for any of the specified tickers.")
+    
+    combined_df = pd.concat(data_list, ignore_index=True)
     return combined_df

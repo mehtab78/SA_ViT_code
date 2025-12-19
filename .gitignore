@@ -119,4 +119,4 @@ data/*.pickle
 temp/
 tmp/
 *.tmp
-*.temp
+*.temp.venv/

@@ -5,7 +5,7 @@ Utility Functions for SA-ViT
 import torch
 import torch.nn as nn
 from typing import Dict, List, Tuple, Optional
-from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix, precision_recall_fscore_support
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -20,7 +20,19 @@ def setup_matplotlib_for_plotting():
     plt.style.use("seaborn-v0_8")
     sns.set_palette("husl")
     
-    plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "WenQuanYi Zen Hei", "PingFang SC", "Arial Unicode MS", "Hiragino Sans GB"]
+    # Use commonly available fonts to avoid font warnings
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib.font_manager")
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        
+        plt.rcParams["font.sans-serif"] = [
+            "DejaVu Sans",           # Default fallback
+            "Arial",                 # Common alternative
+            "Liberation Sans",       # Linux alternative
+            "sans-serif"             # Generic fallback
+        ]
+    
     plt.rcParams["axes.unicode_minus"] = False
 
 def calculate_semantic_vectors(raw_ohlc: torch.Tensor, rule_engine, device: torch.device) -> torch.Tensor:
@@ -175,11 +187,12 @@ def plot_training_curves(history: Dict[str, List[float]],
 
 def evaluate_model(model: nn.Module, dataloader: torch.utils.data.DataLoader, 
                   criterion: nn.Module, device: torch.device, rule_engine) -> Dict:
-    """Comprehensive model evaluation."""
+    """Comprehensive model evaluation with probability outputs for calibration analysis."""
     model.eval()
     running_loss = 0.0
     all_preds = []
     all_targets = []
+    all_probabilities = []
     all_semantic_vectors = []
     
     with torch.no_grad():
@@ -194,15 +207,20 @@ def evaluate_model(model: nn.Module, dataloader: torch.utils.data.DataLoader,
             
             running_loss += loss.item()
             
+            # Get predictions and probabilities
+            probabilities = torch.softmax(outputs, dim=1)
             _, preds = torch.max(outputs, 1)
+            
             all_preds.extend(preds.cpu().numpy())
             all_targets.extend(target.cpu().numpy())
+            all_probabilities.extend(probabilities[:, 1].cpu().numpy())  # Probability of positive class (UP)
             all_semantic_vectors.extend(semantic_vectors_batch.cpu().numpy())
     
     # Calculate metrics
     epoch_loss = running_loss / len(dataloader)
     accuracy = accuracy_score(all_targets, all_preds)
     f1 = f1_score(all_targets, all_preds, average='weighted')
+    precision, recall, _, _ = precision_recall_fscore_support(all_targets, all_preds, average='weighted')
     
     # Pattern analysis
     pattern_vectors = np.array(all_semantic_vectors)
@@ -223,8 +241,11 @@ def evaluate_model(model: nn.Module, dataloader: torch.utils.data.DataLoader,
         'loss': epoch_loss,
         'accuracy': accuracy,
         'f1_score': f1,
+        'precision': precision,
+        'recall': recall,
         'predictions': all_preds,
         'targets': all_targets,
+        'probabilities': all_probabilities,  # For calibration analysis
         'pattern_stats': pattern_stats,
         'classification_report': class_report,
         'confusion_matrix': confusion_matrix(all_targets, all_preds).tolist()
@@ -232,18 +253,28 @@ def evaluate_model(model: nn.Module, dataloader: torch.utils.data.DataLoader,
 
 def save_results(results: Dict, save_path: Path):
     """Save results to JSON file."""
-    # Convert numpy arrays and torch tensors to lists for JSON serialization
-    results_copy = {}
-    for key, value in results.items():
-        if isinstance(value, (np.ndarray, np.integer, np.floating)):
-            results_copy[key] = value.tolist()
-        elif isinstance(value, torch.Tensor):
-            results_copy[key] = value.cpu().numpy().tolist()
-        elif isinstance(value, dict):
-            results_copy[key] = {k: v.tolist() if isinstance(v, np.ndarray) else v 
-                               for k, v in value.items()}
+    # Convert numpy arrays, torch tensors, and Path objects to JSON-serializable formats
+    def convert_to_json_serializable(obj):
+        """Recursively convert objects to JSON-serializable formats."""
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, torch.Tensor):
+            return obj.cpu().numpy().tolist()
+        elif isinstance(obj, Path):
+            return str(obj)  # Convert Path to string
+        elif isinstance(obj, dict):
+            return {k: convert_to_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [convert_to_json_serializable(item) for item in obj]
         else:
-            results_copy[key] = value
+            return obj
+    
+    # Convert all non-serializable types to JSON-serializable formats
+    results_copy = convert_to_json_serializable(results)
     
     with open(save_path, 'w') as f:
         json.dump(results_copy, f, indent=2)

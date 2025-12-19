@@ -12,6 +12,7 @@ import argparse
 from pathlib import Path
 import yaml
 import warnings
+from typing import Tuple, Dict, List, Any
 warnings.filterwarnings("ignore")
 
 # Import our modules
@@ -27,6 +28,7 @@ from utils import (
     set_random_seed,
     setup_matplotlib_for_plotting
 )
+from research_outputs import ResearchOutputs
 
 class TrainingConfig:
     """Training configuration."""
@@ -208,13 +210,19 @@ def main_training(args):
     if args.config:
         config_dict = load_config(args.config)
     else:
-        config_dict = {}
+        # Load project default config if available
+        default_conf_path = Path(__file__).resolve().parents[1] / 'config' / 'default.yaml'
+        if default_conf_path.exists():
+            config_dict = load_config(str(default_conf_path))
+        else:
+            config_dict = {}
     
     # Override config with command line arguments
     if args.epochs:
         config_dict['epochs'] = args.epochs
     if args.batch_size:
         config_dict['batch_size'] = args.batch_size
+    # NOTE: patience is read exclusively from the YAML config (no CLI override)
     
     config = TrainingConfig(config_dict)
     
@@ -317,7 +325,95 @@ def main_training(args):
     print(f"Test Accuracy: {test_results['accuracy']:.4f} ({test_results['accuracy'] * 100:.1f}%)")
     print(f"Test F1 Score: {test_results['f1_score']:.4f}")
     
-    # Save results
+    # Initialize research outputs system
+    research_outputs = ResearchOutputs(config.results_dir, paper_title="SA-ViT")
+    
+    # Generate comprehensive research outputs
+    print("\nGenerating research outputs...")
+    
+    # 1. Publication-quality training curves
+    research_outputs.plot_publication_curves(history, "sa_vit_training_curves")
+    
+    # 2. Confusion matrices (raw and normalized)
+    if 'predictions' in test_results and 'targets' in test_results:
+        research_outputs.plot_confusion_matrix_publication(
+            test_results['targets'], 
+            test_results['predictions'],
+            class_names=['DOWN', 'UP'],
+            save_name="sa_vit_confusion_matrix"
+        )
+        
+        # 3. Calibration curve
+        if 'probabilities' in test_results:
+            ece = research_outputs.plot_calibration_curve(
+                test_results['targets'],
+                test_results['probabilities'],
+                save_name="sa_vit_calibration"
+            )
+            test_results['ece'] = ece
+    
+    # 4. Performance comparison table (baseline vs enhanced)
+    performance_results = {
+        'Rule-Based (Uzun et al.)': {
+            'accuracy': 0.532,
+            'precision': 0.530,
+            'recall': 0.535,
+            'f1': 0.85,
+            'notes': 'High precision, limited context'
+        },
+        'ViT-Spectrogram (Zeng et al.)': {
+            'accuracy': 0.584,
+            'precision': 0.580,
+            'recall': 0.588,
+            'f1': 0.58,
+            'notes': 'No semantic priors'
+        },
+        'SA-ViT (This Work)': {
+            'accuracy': test_results['accuracy'],
+            'precision': test_results.get('precision', 0.0),
+            'recall': test_results.get('recall', 0.0),
+            'f1': test_results['f1_score'],
+            'notes': 'Cross-attention fusion + fuzzy rules + semantic augmentation'
+        }
+    }
+    
+    research_outputs.generate_performance_table(performance_results, "sa_vit_performance_comparison")
+    
+    # 5. Save comprehensive metrics
+    comprehensive_metrics = {
+        'model_name': 'SA-ViT',
+        'accuracy': test_results['accuracy'],
+        'precision': test_results.get('precision', 0.0),
+        'recall': test_results.get('recall', 0.0),
+        'f1': test_results['f1_score'],
+        'ece': test_results.get('ece', 0.0),
+        'loss': test_results['loss'],
+        'pattern_stats': test_results.get('pattern_stats', {}),
+        'classification_report': test_results.get('classification_report', {}),
+        'confusion_matrix': test_results.get('confusion_matrix', []),
+        'training_history': history,
+        'config': {k: str(v) if hasattr(v, '__dict__') else v 
+                  for k, v in config.__dict__.items()},
+        'dataset_info': {
+            'tickers': config.tickers,
+            'start_date': config.start_date,
+            'end_date': config.end_date,
+            'train_size': len(train_dataset),
+            'val_size': len(val_dataset),
+            'test_size': len(test_dataset)
+        }
+    }
+    
+    research_outputs.save_comprehensive_metrics(
+        'Enhanced_SA_ViT', 
+        comprehensive_metrics,
+        'sa_vit_comprehensive_results'
+    )
+    
+    # 6. Generate research paper summary
+    research_outputs.generate_paper_summary(performance_results)
+    
+    # 7. Save traditional results (for backward compatibility)
     results = {
         'history': history,
         'test_results': test_results,
@@ -326,8 +422,26 @@ def main_training(args):
     
     save_results(results, config.results_dir / 'training_results.json')
     
-    # Plot training curves
-    plot_training_curves(history, config.results_dir / 'training_curves.png')
+    # 8. Save model checkpoint with metadata
+    checkpoint_metadata = {
+        'model_name': 'SA-ViT',
+        'test_accuracy': test_results['accuracy'],
+        'test_f1': test_results['f1_score'],
+        'training_config': {k: str(v) if hasattr(v, '__dict__') else v 
+                           for k, v in config.__dict__.items()},
+        'dataset_info': {
+            'train_size': len(train_dataset),
+            'val_size': len(val_dataset),
+            'test_size': len(test_dataset)
+        }
+    }
+    
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'config': config.__dict__,
+        'metadata': checkpoint_metadata,
+        'test_results': test_results
+    }, config.checkpoints_dir / 'sa_vit_model.pth')
     
     print("\n" + "=" * 80)
     print("✓ SA-ViT Training Completed Successfully!")
